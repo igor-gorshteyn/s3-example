@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - file_network
+
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_USER: yourusername
+      POSTGRES_PASSWORD: yourpassword
+      POSTGRES_DB: yourdbname
+    ports:
+      - "5432:5432"
+    networks:
+      - file_network
+
+  transfer_service:
+    build:
+      context: .
+      dockerfile: ./cmd/transferService/Dockerfile
+    container_name: transfer_service
+    environment:
+      - CHUNK_SIZE_BYTES=1048576
+      - MAX_UPLOAD_SIZE_GB=2
+      - SERVER_PORT=8080
+      - GRPC_PORT=5001
+      - REDIS_ADDR=redis:6379
+      - SESSION_TTL=3600
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=yourusername
+      - POSTGRES_PASSWORD=yourpassword
+      - POSTGRES_DB=yourdbname
+    ports:
+      - "8080:8080"
+      - "5001:5001"
+    networks:
+      - file_network
+    depends_on:
+      - redis
+      - postgres
+
+  storage_service_1:
+    build:
+      context: .
+      dockerfile: ./cmd/storageService/Dockerfile
+    container_name: storage_service_1
+    environment:
+      - GRPC_PORT=5002
+      - SERVICE_NAME=storage_service_1
+      - TRANSFER_SERVICE_URL=http://transfer_service:8080
+      - STORAGE_DIR=/data/storage1
+    volumes:
+      - ./storage1:/data/storage1
+    networks:
+      - file_network
+    depends_on:
+      - transfer_service
+
+  storage_service_2:
+    build:
+      context: .
+      dockerfile: ./cmd/storageService/Dockerfile
+    container_name: storage_service_2
+    environment:
+      - GRPC_PORT=5003
+      - SERVICE_NAME=storage_service_2
+      - TRANSFER_SERVICE_URL=http://transfer_service:8080
+      - STORAGE_DIR=/data/storage2
+    volumes:
+      - ./storage2:/data/storage2
+    networks:
+      - file_network
+    depends_on:
+      - transfer_service
+
+networks:
+  file_network:
+    driver: bridge

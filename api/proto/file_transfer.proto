@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package filetransfer;
+
+option go_package = "s3-example/gen/go/filetransfer;filetransfer";
+
+service FileTransferService {
+  rpc TransferFile(stream FileChunk) returns (TransferResponse) {}
+  rpc GetChunk(ChunkRequest) returns (ChunkResponse) {}
+}
+
+message FileChunk {
+  string filename = 1;
+  bytes chunk = 2;
+  int32 chunk_number = 3;
+  int32 total_chunks = 4;
+  string chunk_hash = 5;
+  string service_name = 6;
+}
+
+message TransferResponse {
+  string status = 1;
+}
+
+message ChunkRequest {
+  string filename = 1;
+  int32 chunk_number = 2;
+  string chunk_hash = 3;
+}
+
+message ChunkResponse {
+  bytes chunk = 1;
+}
