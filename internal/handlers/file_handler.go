@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"s3-example/internal/storage"
+	"sync"
 
 	filetransfer "s3-example/api/gen/go"
 	"s3-example/internal/clients"
 	"s3-example/internal/config"
+	"s3-example/internal/storage"
 )
 
 type FileHandler struct {
@@ -141,16 +142,32 @@ func (h *FileHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Upload completed. Total chunks: %d\n", totalChunks)
 
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(chunksMap))
+
 	for serviceName, chunks := range chunksMap {
-		client := h.grpcClientManager.GetClientByName(serviceName)
-		if client == nil {
-			continue
-		}
-		err := h.grpcClientManager.SendChunks(client, chunks)
-		if err != nil {
-			http.Error(w, "Error sending chunks via gRPC: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		wg.Add(1)
+		go func(serviceName string, chunks []*filetransfer.FileChunk) {
+			defer wg.Done()
+			client := h.grpcClientManager.GetClientByName(serviceName)
+			if client == nil {
+				errCh <- fmt.Errorf("gRPC client not found for service: %s", serviceName)
+				return
+			}
+			err := h.grpcClientManager.SendChunks(client, chunks)
+			if err != nil {
+				errCh <- fmt.Errorf("Error sending chunks via gRPC: %v", err)
+				return
+			}
+		}(serviceName, chunks)
+	}
+
+	wg.Wait()
+	close(errCh)
+	if len(errCh) > 0 {
+		err := <-errCh
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -192,40 +209,83 @@ func (h *FileHandler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	totalChunks := fileMetadata.TotalChunks
 
-	for chunkNumber := int32(0); chunkNumber < totalChunks; chunkNumber++ {
-		var metadata storage.ChunkMetadata
-		found := false
-		for _, meta := range chunkMetadataList {
-			if meta.ChunkNumber == chunkNumber {
-				metadata = meta
-				found = true
-				break
+	type chunkResult struct {
+		chunkNumber int32
+		data        []byte
+		err         error
+	}
+
+	results := make([]*chunkResult, totalChunks)
+
+	var wg sync.WaitGroup
+	for i := int32(0); i < totalChunks; i++ {
+		chunkNumber := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var metadata storage.ChunkMetadata
+			found := false
+			for _, meta := range chunkMetadataList {
+				if meta.ChunkNumber == chunkNumber {
+					metadata = meta
+					found = true
+					break
+				}
 			}
-		}
-		if !found {
-			http.Error(w, "Metadata for chunk not found: "+fmt.Sprint(chunkNumber), http.StatusInternalServerError)
+			if !found {
+				results[chunkNumber] = &chunkResult{
+					chunkNumber: chunkNumber,
+					err:         fmt.Errorf("Metadata for chunk not found: %d", chunkNumber),
+				}
+				return
+			}
+
+			client := grpcClients[metadata.ServiceName]
+			if client == nil {
+				results[chunkNumber] = &chunkResult{
+					chunkNumber: chunkNumber,
+					err:         fmt.Errorf("gRPC client not found for service: %s", metadata.ServiceName),
+				}
+				return
+			}
+
+			chunkData, err := h.grpcClientManager.GetChunk(client, filename, metadata.ChunkNumber, metadata.ChunkHash)
+			if err != nil {
+				results[chunkNumber] = &chunkResult{
+					chunkNumber: chunkNumber,
+					err:         fmt.Errorf("Error getting chunk: %v", err),
+				}
+				return
+			}
+
+			chunkHash := calculateChunkHash(chunkData)
+			if chunkHash != metadata.ChunkHash {
+				results[chunkNumber] = &chunkResult{
+					chunkNumber: chunkNumber,
+					err:         fmt.Errorf("Chunk hash mismatch for chunk %d", chunkNumber),
+				}
+				return
+			}
+
+			results[chunkNumber] = &chunkResult{
+				chunkNumber: chunkNumber,
+				data:        chunkData,
+				err:         nil,
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	for _, res := range results {
+		if res.err != nil {
+			http.Error(w, res.err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
 
-		client := grpcClients[metadata.ServiceName]
-		if client == nil {
-			http.Error(w, "gRPC client not found for service: "+metadata.ServiceName, http.StatusInternalServerError)
-			return
-		}
-
-		chunkData, err := h.grpcClientManager.GetChunk(client, filename, metadata.ChunkNumber, metadata.ChunkHash)
-		if err != nil {
-			http.Error(w, "Error getting chunk: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		chunkHash := calculateChunkHash(chunkData)
-		if chunkHash != metadata.ChunkHash {
-			http.Error(w, "Chunk hash mismatch for chunk "+fmt.Sprint(chunkNumber), http.StatusInternalServerError)
-			return
-		}
-
-		_, err = w.Write(chunkData)
+	for _, res := range results {
+		_, err := w.Write(res.data)
 		if err != nil {
 			http.Error(w, "Error sending chunk: "+err.Error(), http.StatusInternalServerError)
 			return
