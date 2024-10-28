@@ -8,7 +8,7 @@
 
 Установка:
 1. git clone [URL репозитория]
-2. cd s3-example
+2. cd s3-task
 3. docker-compose up -d
 4. make migrate
 
@@ -19,16 +19,16 @@ API Endpoints:
    curl -X POST -F "file=@/path/to/your/file.txt" http://localhost:8080/upload
 
 2. Скачивание файла:
-   GET /download/{filename}
-   curl -O http://localhost:8080/download/example.txt
+   GET /download
+   curl -O http://localhost:8080/download?filename=example.txt
 
-3. Информация о файле:
-   GET /info/{filename}
-   curl http://localhost:8080/info/example.txt
+3. Регистрация клиента:
+   POST /register
+   curl -X POST http://localhost:8080/register
 
-4. Удаление файла:
-   DELETE /delete/{filename}
-   curl -X DELETE http://localhost:8080/delete/example.txt
+4. Получение списка клиентов:
+   GET /clients
+   curl http://localhost:8080/clients
 
 Разработка:
 - Сборка: make build
